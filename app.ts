@@ -10,34 +10,37 @@ import orderRouter from "./routes/order.route";
 import notificationRouter from "./routes/notification.route";
 import analyticsRouter from "./routes/analytics.route";
 import layoutRouter from "./routes/layout.route";
-import { rateLimit } from 'express-rate-limit'
+import { rateLimit } from "express-rate-limit";
+import neo4jRouter from "./routes/neo4j.route";
 
 // body parser
-app.use(express.json({ 
-  limit: "50mb",
-  verify: (req: any, res: Response, buf: Buffer) => {
-    req.rawBody = buf; // Store as Buffer, not string
-  }
-}));
+app.use(
+  express.json({
+    limit: "50mb",
+    verify: (req: any, res: Response, buf: Buffer) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 
 // cookie parser
 app.use(cookieParser());
 
-// cors => cross origin resource sharing
+// cors
 app.use(
   cors({
     origin: ["http://localhost:3000"],
     credentials: true,
-  })
+  }),
 );
 
 // api requests limit
 const limiter = rateLimit({
-	windowMs: 15 * 60 * 1000,
-	max: 100, 
-	standardHeaders: 'draft-7', 
-	legacyHeaders: false, 
-})
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+});
 
 // routes
 app.use(
@@ -47,8 +50,11 @@ app.use(
   courseRouter,
   notificationRouter,
   analyticsRouter,
-  layoutRouter
+  layoutRouter,
 );
+
+// neo4j routes — mounted separately
+app.use("/api/v1/neo4j", neo4jRouter);
 
 // testing api
 app.get("/test", (req: Request, res: Response, next: NextFunction) => {

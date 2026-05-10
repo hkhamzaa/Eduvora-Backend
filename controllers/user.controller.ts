@@ -1,5 +1,6 @@
 require("dotenv").config();
 import { Request, Response, NextFunction } from "express";
+import { createUserNode } from "../services/neo4j.service";
 import userModel, { IUser } from "../models/user.model";
 import ErrorHandler from "../utils/ErrorHandler";
 import { CatchAsyncError } from "../middleware/catchAsyncErrors";
@@ -51,7 +52,7 @@ export const registrationUser = CatchAsyncError(
       const data = { user: { name: user.name }, activationCode };
       const html = await ejs.renderFile(
         path.join(__dirname, "../mails/activation-mail.ejs"),
-        data
+        data,
       );
 
       try {
@@ -73,7 +74,7 @@ export const registrationUser = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 interface IActivationToken {
@@ -92,7 +93,7 @@ export const createActivationToken = (user: any): IActivationToken => {
     process.env.ACTIVATION_SECRET as Secret,
     {
       expiresIn: "5m",
-    }
+    },
   );
 
   return { token, activationCode };
@@ -112,7 +113,7 @@ export const activateUser = CatchAsyncError(
 
       const newUser: { user: IUser; activationCode: string } = jwt.verify(
         activation_token,
-        process.env.ACTIVATION_SECRET as string
+        process.env.ACTIVATION_SECRET as string,
       ) as { user: IUser; activationCode: string };
 
       if (newUser.activationCode !== activation_code) {
@@ -132,13 +133,17 @@ export const activateUser = CatchAsyncError(
         password,
       });
 
+      console.log("Creating Neo4j node for:", user._id.toString(), user.email); // ← ADD
+      await createUserNode(user._id.toString(), user.email);
+      console.log("Neo4j node created"); // ← ADD
+
       res.status(201).json({
         success: true,
       });
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // Login user
@@ -148,11 +153,9 @@ interface ILoginRequest {
 }
 
 export const loginUser = CatchAsyncError(
-  
   async (req: Request, res: Response, next: NextFunction) => {
-    console.log('loginuser')
+    console.log("loginuser");
     try {
-      
       const { email, password } = req.body as ILoginRequest;
 
       if (!email || !password) {
@@ -169,13 +172,12 @@ export const loginUser = CatchAsyncError(
       if (!isPasswordMatch) {
         return next(new ErrorHandler("Invalid email or password", 400));
       }
-   console.log('dhhdh',user)
+      console.log("dhhdh", user);
       sendToken(user, 200, res);
     } catch (error: any) {
-
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // logout user
@@ -193,7 +195,7 @@ export const logoutUser = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // update access token
@@ -203,7 +205,7 @@ export const updateAccessToken = CatchAsyncError(
       const refresh_token = req.cookies.refresh_token as string;
       const decoded = jwt.verify(
         refresh_token,
-        process.env.REFRESH_TOKEN as string
+        process.env.REFRESH_TOKEN as string,
       ) as JwtPayload;
 
       const message = "Could not refresh token";
@@ -211,13 +213,13 @@ export const updateAccessToken = CatchAsyncError(
         return next(new ErrorHandler(message, 400));
       }
       const session = await redis.get(decoded.id as string);
-         
+
       if (!session) {
         return next(
-          new ErrorHandler("Please login for access this resources!", 400)
+          new ErrorHandler("Please login for access this resources!", 400),
         );
       }
-      
+
       const user = JSON.parse(session);
 
       const accessToken = jwt.sign(
@@ -225,7 +227,7 @@ export const updateAccessToken = CatchAsyncError(
         process.env.ACCESS_TOKEN as string,
         {
           expiresIn: "5m",
-        }
+        },
       );
 
       const refreshToken = jwt.sign(
@@ -233,7 +235,7 @@ export const updateAccessToken = CatchAsyncError(
         process.env.REFRESH_TOKEN as string,
         {
           expiresIn: "3d",
-        }
+        },
       );
 
       req.user = user;
@@ -247,7 +249,7 @@ export const updateAccessToken = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // get user info
@@ -259,7 +261,7 @@ export const getUserInfo = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 interface ISocialAuthBody {
@@ -276,6 +278,7 @@ export const socialAuth = CatchAsyncError(
       const user = await userModel.findOne({ email });
       if (!user) {
         const newUser = await userModel.create({ email, name, avatar });
+        await createUserNode(newUser._id.toString(), newUser.email);
         sendToken(newUser, 200, res);
       } else {
         sendToken(user, 200, res);
@@ -283,7 +286,7 @@ export const socialAuth = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // update user info
@@ -315,7 +318,7 @@ export const updateUserInfo = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // update user password
@@ -358,7 +361,7 @@ export const updatePassword = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 interface IUpdateProfilePicture {
@@ -435,7 +438,7 @@ export const updateProfilePicture = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // get all users --- only for admin
@@ -446,7 +449,7 @@ export const getAllUsers = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // update user role --- only for admin
@@ -457,7 +460,7 @@ export const updateUserRole = CatchAsyncError(
       const isUserExist = await userModel.findOne({ email });
       if (isUserExist) {
         const id = isUserExist._id;
-        updateUserRoleService(res,id, role);
+        updateUserRoleService(res, id, role);
       } else {
         res.status(400).json({
           success: false,
@@ -467,7 +470,7 @@ export const updateUserRole = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );
 
 // Delete user --- only for admin
@@ -493,5 +496,5 @@ export const deleteUser = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 400));
     }
-  }
+  },
 );

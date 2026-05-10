@@ -11,6 +11,7 @@ import ejs from "ejs";
 import sendMail from "../utils/sendMail";
 import NotificationModel from "../models/notification.Model";
 import axios from "axios";
+import { createCourseNode, updateCourseNode, deleteCourseNode } from "../services/neo4j.service";
 
 // upload course
 export const uploadCourse = CatchAsyncError(
@@ -28,6 +29,7 @@ export const uploadCourse = CatchAsyncError(
           url: myCloud.secure_url,
         };
       }
+      // Neo4j node is created inside course.service.ts → createCourse()
       createCourse(data, res, next);
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 500));
@@ -74,6 +76,17 @@ export const editCourse = CatchAsyncError(
         },
         { new: true }
       );
+
+      // ── NEO4J: sync updated metadata to graph ──────────────────────────
+      if (course) {
+  await updateCourseNode(   // ← correct function
+    course._id.toString(),
+    course.name,
+    (course as any).categories ?? "General",
+    (course as any).level ?? "Beginner"
+  );
+}
+      // ───────────────────────────────────────────────────────────────────
 
       res.status(201).json({
         success: true,
@@ -353,7 +366,7 @@ export const addReview = CatchAsyncError(
       });
 
       if (course) {
-        course.ratings = avg / course.reviews.length; // one example we have 2 reviews one is 5 another one is 4 so math working like this = 9 / 2  = 4.5 ratings
+        course.ratings = avg / course.reviews.length;
       }
 
       await course?.save();
@@ -366,7 +379,6 @@ export const addReview = CatchAsyncError(
         title: "New Review Received",
         message: `${req.user?.name} has given a review in ${course?.name}`,
       });
-
 
       res.status(200).json({
         success: true,
@@ -384,6 +396,7 @@ interface IAddReviewData {
   courseId: string;
   reviewId: string;
 }
+
 export const addReplyToReview = CatchAsyncError(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -415,7 +428,7 @@ export const addReplyToReview = CatchAsyncError(
       }
 
       review.commentReplies?.push(replyData);
-      
+
       await course?.save();
 
       await redis.set(courseId, JSON.stringify(course), "EX", 604800); // 7days
@@ -456,6 +469,10 @@ export const deleteCourse = CatchAsyncError(
       await course.deleteOne({ id });
 
       await redis.del(id);
+
+      // ── NEO4J: remove course node and all its relationships ─────────────
+      await deleteCourseNode(id);
+      // ────────────────────────────────────────────────────────────────────
 
       res.status(200).json({
         success: true,

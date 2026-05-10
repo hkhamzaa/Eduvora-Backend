@@ -10,10 +10,14 @@ import sendMail from "../utils/sendMail";
 import NotificationModel from "../models/notification.Model";
 import { getAllOrdersService, newOrder } from "../services/order.service";
 import { redis } from "../utils/redis";
+import { createEnrollmentRelation } from "../services/neo4j.service";
 require("dotenv").config();
 // const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 import { polar } from "../utils/polar";
-import { validateEvent, WebhookVerificationError } from "@polar-sh/sdk/webhooks";
+import {
+  validateEvent,
+  WebhookVerificationError,
+} from "@polar-sh/sdk/webhooks";
 
 // create order
 export const createOrder = CatchAsyncError(
@@ -39,16 +43,16 @@ export const createOrder = CatchAsyncError(
       const user = await userModel.findById(req.user?._id);
 
       const courseExistInUser = user?.courses.some(
-        (course: any) => course._id.toString() === courseId
+        (course: any) => course.courseId === courseId,
       );
 
       if (courseExistInUser) {
         return next(
-          new ErrorHandler("You have already purchased this course", 400)
+          new ErrorHandler("You have already purchased this course", 400),
         );
       }
 
-      const course:ICourse | null = await CourseModel.findById(courseId);
+      const course: ICourse | null = await CourseModel.findById(courseId);
 
       if (!course) {
         return next(new ErrorHandler("Course not found", 404));
@@ -75,7 +79,7 @@ export const createOrder = CatchAsyncError(
 
       const html = await ejs.renderFile(
         path.join(__dirname, "../mails/order-confirmation.ejs"),
-        { order: mailData }
+        { order: mailData },
       );
 
       try {
@@ -91,11 +95,20 @@ export const createOrder = CatchAsyncError(
         return next(new ErrorHandler(error.message, 500));
       }
 
-      user?.courses.push(course?._id);
+      user?.courses.push({ courseId: course._id.toString() });
 
       await redis.set(req.user?._id, JSON.stringify(user));
 
       await user?.save();
+
+      if (user && course) {
+        await createEnrollmentRelation(
+          user._id.toString(),
+          course._id.toString(),
+          course.name,
+          user.email,
+        );
+      }
 
       await NotificationModel.create({
         user: user?._id,
@@ -111,7 +124,7 @@ export const createOrder = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 500));
     }
-  }
+  },
 );
 
 // get All orders --- only for admin
@@ -122,7 +135,7 @@ export const getAllOrders = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 500));
     }
-  }
+  },
 );
 
 //  send stripe publishble key
@@ -134,7 +147,7 @@ export const sendStripePublishableKey = CatchAsyncError(
     });
     */
     res.status(200).json({ publishablekey: "" });
-  }
+  },
 );
 
 // new payment (Polar Checkout Session)
@@ -145,7 +158,9 @@ export const newPayment = CatchAsyncError(
       const userId = req.user?._id as string;
 
       if (!process.env.POLAR_PRODUCT_ID) {
-        return next(new ErrorHandler("POLAR_PRODUCT_ID is missing in env", 500));
+        return next(
+          new ErrorHandler("POLAR_PRODUCT_ID is missing in env", 500),
+        );
       }
 
       const checkout = await polar.checkouts.create({
@@ -164,7 +179,7 @@ export const newPayment = CatchAsyncError(
     } catch (error: any) {
       return next(new ErrorHandler(error.message, 500));
     }
-  }
+  },
 );
 
 // Polar Webhook
@@ -185,7 +200,7 @@ export const polarWebhook = CatchAsyncError(
 
       const headers: Record<string, string> = {};
       for (const [key, value] of Object.entries(req.headers)) {
-        headers[key] = Array.isArray(value) ? value[0] : (value || "");
+        headers[key] = Array.isArray(value) ? value[0] : value || "";
       }
 
       let event: any;
@@ -201,23 +216,35 @@ export const polarWebhook = CatchAsyncError(
 
       if (event.type === "order.paid") {
         const orderData = event.data;
-        const metadata = orderData.metadata ?? orderData.checkout?.metadata ?? {};
+        const metadata =
+          orderData.metadata ?? orderData.checkout?.metadata ?? {};
 
-        const { courseId, userId } = metadata as { courseId?: string; userId?: string };
+        const { courseId, userId } = metadata as {
+          courseId?: string;
+          userId?: string;
+        };
 
         if (courseId && userId) {
           const user = await userModel.findById(userId);
           const course: ICourse | null = await CourseModel.findById(courseId);
-
+          
           if (user && course) {
             const alreadyEnrolled = user.courses.some(
-              (c: any) => c._id.toString() === courseId
+              (c: any) => c.courseId === courseId, // ← matches your model
             );
-
             if (!alreadyEnrolled) {
-              user.courses.push(course._id);
+              user.courses.push({ courseId: course._id.toString() });
               await redis.set(userId, JSON.stringify(user));
               await user.save();
+
+              if (user && course) {
+                await createEnrollmentRelation(
+                  user._id.toString(),
+                  course._id.toString(),
+                  course.name,
+                  user.email,
+                );
+              }
 
               await NotificationModel.create({
                 user: user._id,
@@ -246,5 +273,5 @@ export const polarWebhook = CatchAsyncError(
       console.error("Webhook Error:", error);
       return next(new ErrorHandler(error.message, 500));
     }
-  }
+  },
 );
