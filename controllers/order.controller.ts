@@ -119,6 +119,7 @@ export const createOrder = CatchAsyncError(
       course.purchased = course.purchased + 1;
 
       await course.save();
+      await redis.set(courseId, JSON.stringify(course), "EX", 604800);
 
       newOrder(data, res, next);
     } catch (error: any) {
@@ -254,6 +255,7 @@ export const polarWebhook = CatchAsyncError(
 
               course.purchased = course.purchased + 1;
               await course.save();
+              await redis.set(courseId, JSON.stringify(course), "EX", 604800);
 
               const orderRecord: any = {
                 courseId: course._id,
