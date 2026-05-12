@@ -6,7 +6,8 @@ import {
   getRecommendedCourses,
   getLearningPath,
   getGraphStats,
-  setPrerequisite
+  setPrerequisite,
+  getEnrollmentGraph,
 } from "../services/neo4j.service";
 import CourseModel from "../models/course.model";
 
@@ -16,13 +17,27 @@ export const getCourseRecommendations = CatchAsyncError(
     const userId = req.user?._id?.toString();
     if (!userId) return next(new ErrorHandler("Not authenticated", 401));
 
-    // Get recommended course IDs from Neo4j
+    // Stable-ordered IDs from Neo4j
     const recommendedIds = await getRecommendedCourses(userId);
 
-    // Fetch full course documents from MongoDB using those IDs
-    const courses = await CourseModel.find({
+    if (recommendedIds.length === 0) {
+      return res.status(200).json({ success: true, courses: [], source: "neo4j-graph" });
+    }
+
+    // Fetch full course details needed by CourseCard from MongoDB
+    const rawCourses = await CourseModel.find({
       _id: { $in: recommendedIds },
-    }).select("name thumbnail description ratings purchased price");
+    }).select(
+      "-courseData.videoUrl -courseData.suggestion -courseData.questions -courseData.links"
+    );
+
+    // Re-sort to match Neo4j order (MongoDB $in does not preserve order)
+    const courseMap = new Map(
+      rawCourses.map((c: any) => [c._id.toString(), c])
+    );
+    const courses = recommendedIds
+      .filter((id) => courseMap.has(id))
+      .map((id) => courseMap.get(id));
 
     res.status(200).json({
       success: true,
@@ -53,6 +68,14 @@ export const getGraphAnalytics = CatchAsyncError(
       success: true,
       graphStats: stats,
     });
+  }
+);
+
+// GET /api/v1/neo4j/enrollment-graph
+export const getEnrollmentGraphData = CatchAsyncError(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const edges = await getEnrollmentGraph();
+    res.status(200).json({ success: true, enrollmentGraph: edges });
   }
 );
 

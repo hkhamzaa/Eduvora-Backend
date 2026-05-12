@@ -133,9 +133,9 @@ export const activateUser = CatchAsyncError(
         password,
       });
 
-      console.log("Creating Neo4j node for:", user._id.toString(), user.email); // ← ADD
+      console.log("About to create Neo4j node for:", user.email);
       await createUserNode(user._id.toString(), user.email);
-      console.log("Neo4j node created"); // ← ADD
+      console.log("Neo4j node created for:", user.email);
 
       res.status(201).json({
         success: true,

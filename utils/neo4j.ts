@@ -29,3 +29,5 @@ export const getNeo4jSession = () => {
 export const closeNeo4j = async () => {
   if (driver) await driver.close();
 };
+
+export const isNeo4jReady = (): boolean => !!driver;

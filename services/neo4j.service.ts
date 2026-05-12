@@ -1,5 +1,9 @@
 // services/neo4j.service.ts
+import neo4j from "neo4j-driver";
 import { getNeo4jSession } from "../utils/neo4j";
+import UserModel from "../models/user.model";
+import CourseModel from "../models/course.model";
+import OrderModel from "../models/order.Model";
 
 // ─────────────────────────────────────────────
 // Called when a user enrolls in a course
@@ -14,8 +18,10 @@ export const createEnrollmentRelation = async (
   try {
     await session.run(
       `
-      MERGE (u:User {id: $userId, email: $userEmail})
-      MERGE (c:Course {id: $courseId, name: $courseName})
+      MERGE (u:User {id: $userId})
+      SET u.email = $userEmail
+      MERGE (c:Course {id: $courseId})
+      SET c.name = $courseName
       MERGE (u)-[r:ENROLLED_IN]->(c)
       SET r.enrolledAt = datetime()
       `,
@@ -125,27 +131,39 @@ export const markCourseCompleted = async (userId: string, courseId: string) => {
 };
 
 // ─────────────────────────────────────────────
-// Get course recommendations for a user
-// Collaborative filtering: "users like you also took..."
+// Get recommended courses — stable deterministic
+// order (sorted by course id so the order never
+// changes between page loads unless new courses
+// are added). userId is kept for future
+// collaborative-filtering upgrade.
 // ─────────────────────────────────────────────
 export const getRecommendedCourses = async (
-  userId: string,
+  _userId: string,
 ): Promise<string[]> => {
   const session = getNeo4jSession();
   try {
+    const countResult = await session.run(
+      `MATCH (c:Course) RETURN COUNT(c) AS total`,
+    );
+    const totalCourses = countResult.records[0].get("total").toNumber();
+    const limit = Math.max(1, Math.round(totalCourses * 0.3));
+
     const result = await session.run(
       `
-      MATCH (u:User {id: $userId})-[:ENROLLED_IN]->(c:Course)
-            <-[:ENROLLED_IN]-(similar:User)-[:ENROLLED_IN]->(rec:Course)
-      WHERE NOT (u)-[:ENROLLED_IN]->(rec)
-        AND u.id <> similar.id
-      RETURN rec.id AS courseId, rec.name AS courseName, COUNT(*) AS score
-      ORDER BY score DESC
-      LIMIT 6
+      MATCH (c:Course)
+      RETURN c.id AS courseId
+      LIMIT $limit
       `,
-      { userId },
+      { limit: neo4j.int(limit) },
     );
-    return result.records.map((r) => r.get("courseId"));
+    const ids = result.records.map((r) => r.get("courseId"));
+
+    const mongoCourses = await CourseModel.find(
+      { _id: { $in: ids } },
+      { purchased: 1 },
+    ).lean();
+    mongoCourses.sort((a: any, b: any) => (b.purchased ?? 0) - (a.purchased ?? 0));
+    return mongoCourses.map((c: any) => c._id.toString());
   } catch (err) {
     console.error("Neo4j getRecommendedCourses error:", err);
     return [];
@@ -242,6 +260,109 @@ export const createUserNode = async (userId: string, email: string) => {
     );
   } catch (err) {
     console.error("Neo4j createUserNode error:", err);
+  } finally {
+    await session.close();
+  }
+};
+
+// ─────────────────────────────────────────────
+// Full sync: wipe Neo4j and rebuild from MongoDB.
+// Source of truth for enrollments is the Order
+// collection — NOT user.courses.
+// ─────────────────────────────────────────────
+export const syncAllToNeo4j = async (): Promise<void> => {
+  const session = getNeo4jSession();
+  try {
+    // 1. Wipe everything
+    await session.run("MATCH (n) DETACH DELETE n");
+
+    // 2. Rebuild User nodes (id only as MERGE key)
+    const users = await UserModel.find({}, "_id email").lean();
+    for (const user of users) {
+      await session.run(
+        `MERGE (u:User {id: $userId}) SET u.email = $email`,
+        { userId: user._id.toString(), email: user.email }
+      );
+    }
+
+    // 3. Rebuild Course nodes + Category nodes + BELONGS_TO
+    const courses = await CourseModel.find({}, "_id name categories level").lean();
+    for (const course of courses) {
+      await session.run(
+        `
+        MERGE (c:Course {id: $courseId})
+        SET c.name = $name, c.category = $category, c.level = $level
+        MERGE (cat:Category {name: $category})
+        MERGE (c)-[:BELONGS_TO]->(cat)
+        `,
+        {
+          courseId: course._id.toString(),
+          name: course.name,
+          category: (course as any).categories ?? "General",
+          level: course.level ?? "Beginner",
+        }
+      );
+    }
+
+    // 4. Rebuild ENROLLED_IN from Orders only
+    const orders = await OrderModel.find({}, "userId courseId").lean();
+    for (const order of orders) {
+      if (!order.userId || !order.courseId) continue;
+      await session.run(
+        `
+        MATCH (u:User   {id: $userId})
+        MATCH (c:Course {id: $courseId})
+        MERGE (u)-[r:ENROLLED_IN]->(c)
+        SET r.enrolledAt = coalesce(r.enrolledAt, datetime())
+        `,
+        { userId: order.userId.toString(), courseId: order.courseId.toString() }
+      );
+    }
+
+    console.log(
+      `Neo4j sync complete — ${users.length} users, ${courses.length} courses, ${orders.length} enrollments`
+    );
+  } catch (err) {
+    console.error("Neo4j syncAllToNeo4j error:", err);
+    throw err;
+  } finally {
+    await session.close();
+  }
+};
+
+// ─────────────────────────────────────────────
+// Return all User→Course enrollment edges for
+// the admin dashboard live graph.
+// ─────────────────────────────────────────────
+export interface EnrollmentEdge {
+  userId: string;
+  userEmail: string;
+  courseId: string;
+  courseName: string;
+}
+
+export const getEnrollmentGraph = async (): Promise<EnrollmentEdge[]> => {
+  const session = getNeo4jSession();
+  try {
+    const result = await session.run(
+      `
+      MATCH (u:User)-[:ENROLLED_IN]->(c:Course)
+      RETURN u.id       AS userId,
+             u.email    AS userEmail,
+             c.id       AS courseId,
+             c.name     AS courseName
+      ORDER BY c.name
+      `
+    );
+    return result.records.map((r) => ({
+      userId:     r.get("userId"),
+      userEmail:  r.get("userEmail"),
+      courseId:   r.get("courseId"),
+      courseName: r.get("courseName"),
+    }));
+  } catch (err) {
+    console.error("Neo4j getEnrollmentGraph error:", err);
+    return [];
   } finally {
     await session.close();
   }
